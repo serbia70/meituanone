@@ -138,14 +138,9 @@
         btn.textContent = "登录中...";
 
         try {
-          const res = await fetch("/api/admin/login", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ username, password }),
-          });
-          const data = await res.json();
-          if (!res.ok || !data.token) {
-            return alert(data.error || `登录失败 (HTTP ${res.status})`);
+          const data = await loginWithXHR({ username, password });
+          if (!data || !data.token) {
+            return alert("登录失败：未收到 token");
           }
 
           localStorage.setItem(tokenKey, String(data.token).trim());
@@ -153,12 +148,43 @@
           loadOrders();
           connectEvents();
         } catch (err) {
-          alert("登录请求失败，请检查服务是否可用");
+          alert(err?.message || "登录请求失败，请检查服务是否可用");
           console.error(err);
         } finally {
           btn.disabled = false;
           btn.textContent = "登录";
         }
+      }
+
+      function loginWithXHR(payload) {
+        return new Promise((resolve, reject) => {
+          const xhr = new XMLHttpRequest();
+          xhr.open("POST", "/api/admin/login", true);
+          xhr.timeout = 10000;
+          xhr.setRequestHeader("Content-Type", "application/json");
+
+          xhr.onload = () => {
+            let data = null;
+            try {
+              data = JSON.parse(xhr.responseText || "{}");
+            } catch (_) {
+              reject(new Error(`登录失败：响应不是 JSON (HTTP ${xhr.status})`));
+              return;
+            }
+
+            if (xhr.status < 200 || xhr.status >= 300) {
+              reject(new Error(data.error || `登录失败 (HTTP ${xhr.status})`));
+              return;
+            }
+
+            resolve(data);
+          };
+
+          xhr.onerror = () => reject(new Error("登录请求失败：网络异常"));
+          xhr.ontimeout = () => reject(new Error("登录超时：请检查网络或服务"));
+
+          xhr.send(JSON.stringify(payload));
+        });
       }
 
       async function changeStatus(id, status) {
