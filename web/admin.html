@@ -138,28 +138,22 @@
         btn.textContent = "登录中...";
 
         try {
-          const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 8000);
           const res = await fetch("/api/admin/login", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ username, password }),
-            signal: controller.signal,
           });
-          clearTimeout(timeoutId);
           const data = await res.json();
-          if (!res.ok || !data.token) return alert(data.error || "登录失败");
+          if (!res.ok || !data.token) {
+            return alert(data.error || `登录失败 (HTTP ${res.status})`);
+          }
 
           localStorage.setItem(tokenKey, String(data.token).trim());
           document.getElementById("login").style.display = "none";
           loadOrders();
           connectEvents();
         } catch (err) {
-          if (err.name === "AbortError") {
-            alert("登录超时，请检查网络或服务状态");
-          } else {
-            alert("登录请求失败，请检查服务是否可用");
-          }
+          alert("登录请求失败，请检查服务是否可用");
           console.error(err);
         } finally {
           btn.disabled = false;
