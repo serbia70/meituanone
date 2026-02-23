@@ -108,8 +108,17 @@
       let eventSource = null;
       let loading = false;
 
+      function isLikelyJWT(value) {
+        return /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(value || "");
+      }
+
       function token() {
-        return localStorage.getItem(tokenKey) || "";
+        const value = localStorage.getItem(tokenKey) || "";
+        if (!value) return "";
+        if (isLikelyJWT(value)) return value;
+
+        localStorage.removeItem(tokenKey);
+        return "";
       }
 
       function authHeaders() {
@@ -124,18 +133,38 @@
         const password = document.getElementById("password").value;
         if (!password) return alert("请输入密码");
 
-        const res = await fetch("/api/admin/login", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ username, password }),
-        });
-        const data = await res.json();
-        if (!res.ok || !data.token) return alert(data.error || "登录失败");
+        const btn = document.getElementById("login-btn");
+        btn.disabled = true;
+        btn.textContent = "登录中...";
 
-        localStorage.setItem(tokenKey, data.token);
-        document.getElementById("login").style.display = "none";
-        loadOrders();
-        connectEvents();
+        try {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 8000);
+          const res = await fetch("/api/admin/login", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ username, password }),
+            signal: controller.signal,
+          });
+          clearTimeout(timeoutId);
+          const data = await res.json();
+          if (!res.ok || !data.token) return alert(data.error || "登录失败");
+
+          localStorage.setItem(tokenKey, String(data.token).trim());
+          document.getElementById("login").style.display = "none";
+          loadOrders();
+          connectEvents();
+        } catch (err) {
+          if (err.name === "AbortError") {
+            alert("登录超时，请检查网络或服务状态");
+          } else {
+            alert("登录请求失败，请检查服务是否可用");
+          }
+          console.error(err);
+        } finally {
+          btn.disabled = false;
+          btn.textContent = "登录";
+        }
       }
 
       async function changeStatus(id, status) {
@@ -214,8 +243,11 @@
           }
           const data = await res.json();
           renderOrders(data.orders || []);
-        } catch {
-          // Keep current UI if temporary network error occurs.
+        } catch (err) {
+          console.error("loadOrders failed:", err);
+          localStorage.removeItem(tokenKey);
+          document.getElementById("login").style.display = "flex";
+          disconnectEvents();
         } finally {
           loading = false;
         }
@@ -264,6 +296,8 @@
         document.getElementById("login").style.display = "none";
         loadOrders();
         connectEvents();
+      } else {
+        document.getElementById("login").style.display = "flex";
       }
     </script>
   </body>

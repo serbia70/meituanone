@@ -62,6 +62,33 @@ After troubleshooting, switch back to low-write settings.
 
 ## N1 Deployment
 
+### One-command bootstrap (fresh Debian 12)
+
+On N1 server:
+
+```bash
+sudo mkdir -p /opt && cd /opt
+sudo git clone https://github.com/serbia70/meituanone.git
+cd meituanone
+sudo chmod +x scripts/bootstrap-n1.sh
+sudo GHCR_USER=serbia70 GHCR_PAT=<your_pat_with_read_packages> sh scripts/bootstrap-n1.sh
+```
+
+If image is public, you can omit `GHCR_USER` and `GHCR_PAT`.
+
+The script does:
+
+- install base tools (`git`, `curl`)
+- install Docker if missing
+- clone/pull repo to `/opt/meituanone`
+- create `.env` from `.env.n1.production.example` if missing
+- deploy `ghcr.io/serbia70/meituanone:latest`
+- run health check
+
+Then edit `/opt/meituanone/.env` and redeploy if needed.
+
+### Manual deploy
+
 ```bash
 chmod +x scripts/deploy-n1.sh
 ./scripts/deploy-n1.sh ghcr.io/serbia70/meituanone:latest

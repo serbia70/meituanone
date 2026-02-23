@@ -57,6 +57,12 @@ func main() {
 	r.GET("/admin", func(c *gin.Context) {
 		c.File(filepath.Join(cfg.WebDir, "admin.html"))
 	})
+	r.GET("/admin/", func(c *gin.Context) {
+		c.File(filepath.Join(cfg.WebDir, "admin.html"))
+	})
+	r.GET("/admin.html", func(c *gin.Context) {
+		c.File(filepath.Join(cfg.WebDir, "admin.html"))
+	})
 
 	addr := ":" + cfg.Port
 	log.Printf("MeituanOne started on %s", addr)

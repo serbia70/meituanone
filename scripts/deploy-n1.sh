@@ -29,7 +29,12 @@ CORS_ORIGIN=*
 EOF
 fi
 
-docker pull "$IMAGE"
+if docker image inspect "$IMAGE" >/dev/null 2>&1; then
+  echo "[INFO] Image exists locally, skip pull: $IMAGE"
+else
+  echo "[INFO] Pulling image: $IMAGE"
+  docker pull "$IMAGE"
+fi
 
 if docker ps -a --format '{{.Names}}' | grep -q "^${APP_NAME}$"; then
   docker rm -f "$APP_NAME"
