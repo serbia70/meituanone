@@ -1,0 +1,22 @@
+version: "3.8"
+
+services:
+  app:
+    image: ghcr.io/serbia70/meituanone:latest
+    container_name: meituanone-shop
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      # 如果是 USB 打印机，建议打开这一行
+      # - /dev/usb:/dev/usb
+    tmpfs:
+      - /tmp:size=32m

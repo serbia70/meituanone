@@ -1,0 +1,10 @@
+version: "3.8"
+
+services:
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    container_name: meituanone-tunnel
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run --token ${CF_TUNNEL_TOKEN}
+    depends_on:
+      - app

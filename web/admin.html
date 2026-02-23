@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>店铺管理后台</title>
+    <style>
+      :root {
+        --bg: #f3f4f6;
+        --card: #fff;
+        --line: #e5e7eb;
+        --text: #111827;
+        --muted: #6b7280;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+        background: var(--bg);
+        color: var(--text);
+      }
+      .container {
+        max-width: 980px;
+        margin: 0 auto;
+        padding: 16px;
+      }
+      .toolbar {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 12px;
+      }
+      .btn {
+        border: none;
+        border-radius: 8px;
+        background: #111827;
+        color: #fff;
+        padding: 8px 12px;
+        cursor: pointer;
+      }
+      .order {
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        margin-bottom: 10px;
+        padding: 12px;
+      }
+      .order h3 {
+        margin: 0 0 6px;
+        font-size: 16px;
+      }
+      .muted { color: var(--muted); font-size: 13px; }
+      .items { margin: 10px 0; padding-left: 18px; }
+      .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+      .status {
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        padding: 3px 8px;
+        font-size: 12px;
+      }
+      .login {
+        position: fixed;
+        inset: 0;
+        background: #1f2937;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+      }
+      .login-card {
+        width: 100%;
+        max-width: 320px;
+        background: #fff;
+        border-radius: 12px;
+        padding: 20px;
+      }
+      .login-card input {
+        width: 100%;
+        margin-bottom: 10px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 10px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="login" class="login">
+      <div class="login-card">
+        <h2 style="margin-top: 0">管理员登录</h2>
+        <input id="username" placeholder="用户名 (默认admin)" value="admin" />
+        <input id="password" type="password" placeholder="密码" />
+        <button id="login-btn" class="btn" style="width: 100%">登录</button>
+      </div>
+    </div>
+
+    <div class="container">
+      <div class="toolbar">
+        <h1 style="margin: 0; font-size: 24px">订单管理</h1>
+        <div style="display: flex; gap: 8px">
+          <button class="btn" id="refresh">刷新</button>
+          <button class="btn" id="logout" style="background: #ef4444">退出</button>
+        </div>
+      </div>
+      <div id="orders"></div>
+    </div>
+
+    <script>
+      const tokenKey = "meituan_admin_token";
+      let eventSource = null;
+      let loading = false;
+
+      function token() {
+        return localStorage.getItem(tokenKey) || "";
+      }
+
+      function authHeaders() {
+        return {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token()}`,
+        };
+      }
+
+      async function login() {
+        const username = document.getElementById("username").value.trim();
+        const password = document.getElementById("password").value;
+        if (!password) return alert("请输入密码");
+
+        const res = await fetch("/api/admin/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username, password }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.token) return alert(data.error || "登录失败");
+
+        localStorage.setItem(tokenKey, data.token);
+        document.getElementById("login").style.display = "none";
+        loadOrders();
+        connectEvents();
+      }
+
+      async function changeStatus(id, status) {
+        const res = await fetch(`/api/admin/orders/${id}/status`, {
+          method: "PATCH",
+          headers: authHeaders(),
+          body: JSON.stringify({ status }),
+        });
+        if (!res.ok) {
+          const data = await res.json();
+          alert(data.error || "更新状态失败");
+          return;
+        }
+        loadOrders();
+      }
+
+      async function printOrder(id) {
+        const res = await fetch(`/api/admin/orders/${id}/print`, {
+          method: "POST",
+          headers: authHeaders(),
+        });
+        if (!res.ok) {
+          const data = await res.json();
+          alert(data.error || "打印失败");
+          return;
+        }
+        alert("打印已发送");
+        loadOrders();
+      }
+
+      function renderOrders(orders) {
+        const root = document.getElementById("orders");
+        root.innerHTML = "";
+
+        if (!orders.length) {
+          root.innerHTML = '<div class="muted">暂无订单</div>';
+          return;
+        }
+
+        for (const o of orders) {
+          const div = document.createElement("div");
+          div.className = "order";
+          div.innerHTML = `
+            <h3>
+              ${o.order_no}
+              <span class="status">${o.status}</span>
+              <span class="status">打印: ${o.print_status}</span>
+            </h3>
+            <div class="muted">${new Date(o.created_at).toLocaleString()} | ${o.order_type}</div>
+            <div class="muted">顾客: ${o.customer_name || "匿名"} ${o.customer_phone || ""}</div>
+            <ul class="items">
+              ${(o.items || []).map((i) => `<li>${i.product_name} x${i.qty} = ${i.subtotal} RSD</li>`).join("")}
+            </ul>
+            <div><strong>总计: ${o.total_amount} RSD</strong></div>
+            <div class="actions" style="margin-top: 8px">
+              <button class="btn" data-status="accepted" data-id="${o.id}">接单</button>
+              <button class="btn" data-status="preparing" data-id="${o.id}">制作中</button>
+              <button class="btn" data-status="completed" data-id="${o.id}">完成</button>
+              <button class="btn" data-print="${o.id}" style="background:#0ea5e9">重打</button>
+            </div>
+          `;
+          root.appendChild(div);
+        }
+      }
+
+      async function loadOrders() {
+        if (loading) return;
+        loading = true;
+        try {
+          const res = await fetch("/api/admin/orders", { headers: authHeaders() });
+          if (res.status === 401) {
+            localStorage.removeItem(tokenKey);
+            document.getElementById("login").style.display = "flex";
+            disconnectEvents();
+            return;
+          }
+          const data = await res.json();
+          renderOrders(data.orders || []);
+        } catch {
+          // Keep current UI if temporary network error occurs.
+        } finally {
+          loading = false;
+        }
+      }
+
+      function connectEvents() {
+        disconnectEvents();
+        if (!token()) return;
+
+        const url = `/api/admin/events?token=${encodeURIComponent(token())}`;
+        eventSource = new EventSource(url);
+        eventSource.onmessage = () => {
+          loadOrders();
+        };
+        eventSource.onerror = () => {
+          // Let EventSource auto-reconnect.
+        };
+      }
+
+      function disconnectEvents() {
+        if (!eventSource) return;
+        eventSource.close();
+        eventSource = null;
+      }
+
+      document.getElementById("login-btn").addEventListener("click", login);
+      document.getElementById("refresh").addEventListener("click", loadOrders);
+      document.getElementById("logout").addEventListener("click", () => {
+        localStorage.removeItem(tokenKey);
+        document.getElementById("login").style.display = "flex";
+        disconnectEvents();
+      });
+
+      document.body.addEventListener("click", (e) => {
+        const id = e.target.getAttribute("data-id");
+        const status = e.target.getAttribute("data-status");
+        if (id && status) {
+          changeStatus(Number(id), status);
+        }
+
+        const pid = e.target.getAttribute("data-print");
+        if (pid) printOrder(Number(pid));
+      });
+
+      if (token()) {
+        document.getElementById("login").style.display = "none";
+        loadOrders();
+        connectEvents();
+      }
+    </script>
+  </body>
+</html>
