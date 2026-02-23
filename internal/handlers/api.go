@@ -507,14 +507,17 @@ func (a *App) listOrders(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "scan order failed"})
 			return
 		}
+		orders = append(orders, o)
+	}
 
-		itemRows, err := a.DB.Query("SELECT product_id, product_name, unit_price, qty, subtotal FROM order_items WHERE order_id = ? ORDER BY id ASC", o.ID)
+	for i := range orders {
+		itemRows, err := a.DB.Query("SELECT product_id, product_name, unit_price, qty, subtotal FROM order_items WHERE order_id = ? ORDER BY id ASC", orders[i].ID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "load order items failed"})
 			return
 		}
 
-		o.Items = make([]orderItem, 0)
+		orders[i].Items = make([]orderItem, 0)
 		for itemRows.Next() {
 			var it orderItem
 			if err := itemRows.Scan(&it.ProductID, &it.ProductName, &it.UnitPrice, &it.Qty, &it.Subtotal); err != nil {
@@ -522,11 +525,9 @@ func (a *App) listOrders(c *gin.Context) {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "scan order item failed"})
 				return
 			}
-			o.Items = append(o.Items, it)
+			orders[i].Items = append(orders[i].Items, it)
 		}
 		itemRows.Close()
-
-		orders = append(orders, o)
 	}
 
 	c.JSON(http.StatusOK, gin.H{"orders": orders})
