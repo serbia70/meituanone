@@ -123,37 +123,70 @@ def ensure_target_schema(conn):
     conn.commit()
 
 
+def table_exists(conn, table_name):
+    cur = conn.cursor()
+    row = cur.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1", (table_name,)
+    ).fetchone()
+    return bool(row)
+
+
+def table_columns(conn, table_name):
+    if not table_exists(conn, table_name):
+        return set()
+    cur = conn.cursor()
+    rows = cur.execute(f"PRAGMA table_info({table_name})").fetchall()
+    return {r[1] for r in rows}
+
+
+def select_col_value(columns, name, fallback_sql):
+    if name in columns:
+        return name
+    return fallback_sql
+
+
+def select_col_as(columns, name, fallback_sql):
+    return f"{select_col_value(columns, name, fallback_sql)} AS {name}"
+
+
 def find_legacy_ids(src_conn, slug):
     src = src_conn.cursor()
-    shop_row = src.execute("SELECT id FROM shops WHERE slug = ?", (slug,)).fetchone()
-    restaurant_row = src.execute("SELECT id FROM restaurants WHERE slug = ?", (slug,)).fetchone()
-    shop_id = shop_row[0] if shop_row else None
-    restaurant_id = restaurant_row[0] if restaurant_row else None
+
+    shop_id = None
+    if table_exists(src_conn, "shops"):
+        shop_row = src.execute("SELECT id FROM shops WHERE slug = ?", (slug,)).fetchone()
+        shop_id = shop_row[0] if shop_row else None
+
+    restaurant_id = None
+    if table_exists(src_conn, "restaurants"):
+        restaurant_row = src.execute("SELECT id FROM restaurants WHERE slug = ?", (slug,)).fetchone()
+        restaurant_id = restaurant_row[0] if restaurant_row else None
+
     return shop_id, restaurant_id
 
 
 def list_legacy_slugs(src_conn):
     cur = src_conn.cursor()
-    rows = cur.execute(
-        """
-        SELECT slug FROM (
-          SELECT slug FROM shops WHERE TRIM(COALESCE(slug, '')) != ''
-          UNION
-          SELECT slug FROM restaurants WHERE TRIM(COALESCE(slug, '')) != ''
-        )
-        ORDER BY slug ASC
-        """
-    ).fetchall()
-    return [row[0] for row in rows]
+    slugs = set()
+
+    if table_exists(src_conn, "shops"):
+        rows = cur.execute("SELECT slug FROM shops WHERE TRIM(COALESCE(slug, '')) != ''").fetchall()
+        slugs.update(row[0] for row in rows if row[0])
+
+    if table_exists(src_conn, "restaurants"):
+        rows = cur.execute("SELECT slug FROM restaurants WHERE TRIM(COALESCE(slug, '')) != ''").fetchall()
+        slugs.update(row[0] for row in rows if row[0])
+
+    return sorted(slugs)
 
 
-def build_filter(shop_id, restaurant_id):
+def build_filter_for_table(columns, shop_id, restaurant_id):
     clauses = []
     params = []
-    if shop_id is not None:
+    if shop_id is not None and "shop_id" in columns:
         clauses.append("shop_id = ?")
         params.append(shop_id)
-    if restaurant_id is not None:
+    if restaurant_id is not None and "restaurant_id" in columns:
         clauses.append("restaurant_id = ?")
         params.append(restaurant_id)
     if not clauses:
@@ -188,13 +221,26 @@ def import_legacy(source, target, slug, replace_menu, replace_orders, dry_run):
         src = src_conn.cursor()
         dst = dst_conn.cursor()
 
+        if not table_exists(src_conn, "categories"):
+            raise RuntimeError("legacy database missing table: categories")
+        if not table_exists(src_conn, "products"):
+            raise RuntimeError("legacy database missing table: products")
+        if not table_exists(src_conn, "orders"):
+            raise RuntimeError("legacy database missing table: orders")
+
+        category_cols = table_columns(src_conn, "categories")
+        product_cols = table_columns(src_conn, "products")
+        order_cols = table_columns(src_conn, "orders")
+
         shop_id, restaurant_id = find_legacy_ids(src_conn, slug)
         if shop_id is None and restaurant_id is None:
             raise RuntimeError(f"slug '{slug}' not found in legacy shops/restaurants")
 
-        category_filter, category_params = build_filter(shop_id, restaurant_id)
-        product_filter, product_params = build_filter(shop_id, restaurant_id)
-        order_filter, order_params = build_filter(shop_id, restaurant_id)
+        category_filter, category_params = build_filter_for_table(category_cols, shop_id, restaurant_id)
+        product_filter, product_params = build_filter_for_table(product_cols, shop_id, restaurant_id)
+        order_filter, order_params = build_filter_for_table(order_cols, shop_id, restaurant_id)
+
+        order_not_deleted = "COALESCE(is_deleted,0)=0" if "is_deleted" in order_cols else "1=1"
 
         src_cat_count = src.execute(
             f"SELECT COUNT(*) FROM categories WHERE {category_filter}", category_params
@@ -202,9 +248,7 @@ def import_legacy(source, target, slug, replace_menu, replace_orders, dry_run):
         src_prod_count = src.execute(
             f"SELECT COUNT(*) FROM products WHERE {product_filter}", product_params
         ).fetchone()[0]
-        src_order_count = src.execute(
-            f"SELECT COUNT(*) FROM orders WHERE {order_filter} AND COALESCE(is_deleted,0)=0", order_params
-        ).fetchone()[0]
+        src_order_count = src.execute(f"SELECT COUNT(*) FROM orders WHERE {order_filter} AND {order_not_deleted}", order_params).fetchone()[0]
 
         print(f"[INFO] legacy slug={slug} shop_id={shop_id} restaurant_id={restaurant_id}")
         print(f"[INFO] source categories={src_cat_count}, products={src_prod_count}, orders={src_order_count}")
@@ -223,8 +267,9 @@ def import_legacy(source, target, slug, replace_menu, replace_orders, dry_run):
         prod_map = {}
 
         if replace_menu:
+            cat_updated_expr = select_col_as(category_cols, "updated_at", "''")
             cat_rows = src.execute(
-                f"SELECT id, name, COALESCE(sort_order,0) AS sort_order, COALESCE(updated_at,'') AS updated_at "
+                f"SELECT id, name, COALESCE(sort_order,0) AS sort_order, {cat_updated_expr} "
                 f"FROM categories WHERE {category_filter} ORDER BY sort_order ASC, id ASC",
                 category_params,
             ).fetchall()
@@ -237,10 +282,14 @@ def import_legacy(source, target, slug, replace_menu, replace_orders, dry_run):
                 )
                 cat_map[row["id"]] = dst.lastrowid
 
+            prod_img_expr = select_col_value(product_cols, "img", "''")
+            prod_sub_name_expr = select_col_value(product_cols, "sub_name", "''")
+            prod_updated_expr = select_col_value(product_cols, "updated_at", "''")
+            prod_is_available_expr = select_col_value(product_cols, "is_available", "1")
             prod_rows = src.execute(
-                f"SELECT id, category_id, name, COALESCE(price,0) AS price, COALESCE(img,'') AS img, "
-                f"COALESCE(sub_name,'') AS sub_name, COALESCE(sort_order,0) AS sort_order, COALESCE(is_available,1) AS is_available, "
-                f"COALESCE(updated_at,'') AS updated_at "
+                f"SELECT id, category_id, name, COALESCE(price,0) AS price, COALESCE({prod_img_expr},'') AS img, "
+                f"COALESCE({prod_sub_name_expr},'') AS sub_name, COALESCE(sort_order,0) AS sort_order, COALESCE({prod_is_available_expr},1) AS is_available, "
+                f"COALESCE({prod_updated_expr},'') AS updated_at "
                 f"FROM products WHERE {product_filter} ORDER BY sort_order ASC, id ASC",
                 product_params,
             ).fetchall()
@@ -270,12 +319,19 @@ def import_legacy(source, target, slug, replace_menu, replace_orders, dry_run):
         imported_items = 0
 
         if replace_orders:
+            order_table_info_expr = select_col_value(order_cols, "table_info", "''")
+            order_items_json_expr = select_col_value(order_cols, "items_json", "''")
+            order_user_phone_expr = select_col_value(order_cols, "user_phone", "''")
+            order_updated_expr = select_col_value(order_cols, "updated_at", "''")
+            order_print_status_expr = select_col_value(order_cols, "print_status", "'pending'")
+            order_delivery_info_expr = select_col_value(order_cols, "delivery_info", "''")
+            order_remarks_expr = select_col_value(order_cols, "remarks_json", "''")
             order_rows = src.execute(
                 f"SELECT id, order_no, COALESCE(total_amount,0) AS total_amount, COALESCE(order_type,'dine_in') AS order_type, "
-                f"COALESCE(table_info,'') AS table_info, COALESCE(items_json,'') AS items_json, COALESCE(user_phone,'') AS user_phone, "
-                f"COALESCE(status,'pending') AS status, COALESCE(created_at,'') AS created_at, COALESCE(updated_at,'') AS updated_at, "
-                f"COALESCE(print_status,'pending') AS print_status, COALESCE(delivery_info,'') AS delivery_info, COALESCE(remarks_json,'') AS remarks_json "
-                f"FROM orders WHERE {order_filter} AND COALESCE(is_deleted,0)=0 ORDER BY id ASC",
+                f"COALESCE({order_table_info_expr},'') AS table_info, COALESCE({order_items_json_expr},'') AS items_json, COALESCE({order_user_phone_expr},'') AS user_phone, "
+                f"COALESCE(status,'pending') AS status, COALESCE(created_at,'') AS created_at, COALESCE({order_updated_expr},'') AS updated_at, "
+                f"COALESCE({order_print_status_expr},'pending') AS print_status, COALESCE({order_delivery_info_expr},'') AS delivery_info, COALESCE({order_remarks_expr},'') AS remarks_json "
+                f"FROM orders WHERE {order_filter} AND {order_not_deleted} ORDER BY id ASC",
                 order_params,
             ).fetchall()
 
