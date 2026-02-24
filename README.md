@@ -207,3 +207,32 @@ When pushing to `main`, GitHub Actions builds and pushes:
 ## Environment Variables
 
 See `.env.example`.
+
+## Import Legacy Data (meituanGo)
+
+Use `scripts/import-legacy-db.py` to import one legacy shop slug from old `meituan.db`.
+
+Example (replace menu + orders):
+
+```bash
+python scripts/import-legacy-db.py \
+  --source /path/to/meituan.db \
+  --target /opt/meituanone/data/shop.db \
+  --slug 01 \
+  --replace-menu \
+  --replace-orders
+```
+
+Dry-run (no write):
+
+```bash
+python scripts/import-legacy-db.py \
+  --source /path/to/meituan.db \
+  --target /opt/meituanone/data/shop.db \
+  --slug 05 \
+  --replace-menu \
+  --replace-orders \
+  --dry-run
+```
+
+Note: in your provided legacy database, slug `05` has menu data but `0` orders.
