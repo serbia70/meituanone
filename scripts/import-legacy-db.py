@@ -1,9 +1,73 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import os
 import sqlite3
 import sys
 from datetime import datetime, timezone
+
+
+TARGET_SCHEMA = """
+CREATE TABLE IF NOT EXISTS admins (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  username TEXT NOT NULL UNIQUE,
+  password_hash TEXT NOT NULL,
+  email TEXT,
+  created_at DATETIME NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS categories (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  is_active INTEGER NOT NULL DEFAULT 1,
+  created_at DATETIME NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS products (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  category_id INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  price INTEGER NOT NULL,
+  image TEXT,
+  description TEXT,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  is_active INTEGER NOT NULL DEFAULT 1,
+  created_at DATETIME NOT NULL,
+  FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS orders (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  order_no TEXT NOT NULL UNIQUE,
+  customer_name TEXT,
+  customer_phone TEXT,
+  order_type TEXT NOT NULL,
+  address TEXT,
+  note TEXT,
+  total_amount INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  print_status TEXT NOT NULL DEFAULT 'pending',
+  created_at DATETIME NOT NULL,
+  updated_at DATETIME NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS order_items (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  order_id INTEGER NOT NULL,
+  product_id INTEGER NOT NULL,
+  product_name TEXT NOT NULL,
+  unit_price INTEGER NOT NULL,
+  qty INTEGER NOT NULL,
+  subtotal INTEGER NOT NULL,
+  created_at DATETIME NOT NULL,
+  FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_orders_created_at ON orders(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
+CREATE INDEX IF NOT EXISTS idx_products_category ON products(category_id);
+"""
 
 
 def now_iso() -> str:
@@ -49,10 +113,14 @@ def parse_items(items_json):
 
     result = []
     for item in data:
-        if not isinstance(item, dict):
-            continue
-        result.append(item)
+        if isinstance(item, dict):
+            result.append(item)
     return result
+
+
+def ensure_target_schema(conn):
+    conn.executescript(TARGET_SCHEMA)
+    conn.commit()
 
 
 def find_legacy_ids(src_conn, slug):
@@ -62,6 +130,21 @@ def find_legacy_ids(src_conn, slug):
     shop_id = shop_row[0] if shop_row else None
     restaurant_id = restaurant_row[0] if restaurant_row else None
     return shop_id, restaurant_id
+
+
+def list_legacy_slugs(src_conn):
+    cur = src_conn.cursor()
+    rows = cur.execute(
+        """
+        SELECT slug FROM (
+          SELECT slug FROM shops WHERE TRIM(COALESCE(slug, '')) != ''
+          UNION
+          SELECT slug FROM restaurants WHERE TRIM(COALESCE(slug, '')) != ''
+        )
+        ORDER BY slug ASC
+        """
+    ).fetchall()
+    return [row[0] for row in rows]
 
 
 def build_filter(shop_id, restaurant_id):
@@ -92,12 +175,16 @@ def ensure_unique_order_no(dst_conn, order_no):
 
 
 def import_legacy(source, target, slug, replace_menu, replace_orders, dry_run):
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+
     src_conn = sqlite3.connect(source)
     src_conn.row_factory = sqlite3.Row
     dst_conn = sqlite3.connect(target)
     dst_conn.row_factory = sqlite3.Row
 
     try:
+        ensure_target_schema(dst_conn)
+
         src = src_conn.cursor()
         dst = dst_conn.cursor()
 
@@ -135,48 +222,49 @@ def import_legacy(source, target, slug, replace_menu, replace_orders, dry_run):
         cat_map = {}
         prod_map = {}
 
-        cat_rows = src.execute(
-            f"SELECT id, name, COALESCE(sort_order,0) AS sort_order, COALESCE(updated_at,'') AS updated_at "
-            f"FROM categories WHERE {category_filter} ORDER BY sort_order ASC, id ASC",
-            category_params,
-        ).fetchall()
+        if replace_menu:
+            cat_rows = src.execute(
+                f"SELECT id, name, COALESCE(sort_order,0) AS sort_order, COALESCE(updated_at,'') AS updated_at "
+                f"FROM categories WHERE {category_filter} ORDER BY sort_order ASC, id ASC",
+                category_params,
+            ).fetchall()
 
-        for row in cat_rows:
-            created = row["updated_at"] if row["updated_at"] else now_iso()
-            dst.execute(
-                "INSERT INTO categories (name, sort_order, is_active, created_at) VALUES (?, ?, 1, ?)",
-                (row["name"], safe_int(row["sort_order"], 0), created),
-            )
-            cat_map[row["id"]] = dst.lastrowid
+            for row in cat_rows:
+                created = row["updated_at"] if row["updated_at"] else now_iso()
+                dst.execute(
+                    "INSERT INTO categories (name, sort_order, is_active, created_at) VALUES (?, ?, 1, ?)",
+                    (row["name"], safe_int(row["sort_order"], 0), created),
+                )
+                cat_map[row["id"]] = dst.lastrowid
 
-        prod_rows = src.execute(
-            f"SELECT id, category_id, name, COALESCE(price,0) AS price, COALESCE(img,'') AS img, "
-            f"COALESCE(sub_name,'') AS sub_name, COALESCE(sort_order,0) AS sort_order, COALESCE(is_available,1) AS is_available, "
-            f"COALESCE(updated_at,'') AS updated_at "
-            f"FROM products WHERE {product_filter} ORDER BY sort_order ASC, id ASC",
-            product_params,
-        ).fetchall()
+            prod_rows = src.execute(
+                f"SELECT id, category_id, name, COALESCE(price,0) AS price, COALESCE(img,'') AS img, "
+                f"COALESCE(sub_name,'') AS sub_name, COALESCE(sort_order,0) AS sort_order, COALESCE(is_available,1) AS is_available, "
+                f"COALESCE(updated_at,'') AS updated_at "
+                f"FROM products WHERE {product_filter} ORDER BY sort_order ASC, id ASC",
+                product_params,
+            ).fetchall()
 
-        for row in prod_rows:
-            new_cat_id = cat_map.get(row["category_id"])
-            if not new_cat_id:
-                continue
-            created = row["updated_at"] if row["updated_at"] else now_iso()
-            dst.execute(
-                "INSERT INTO products (category_id, name, price, image, description, sort_order, is_active, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    new_cat_id,
-                    row["name"],
-                    safe_int(row["price"], 0),
-                    row["img"],
-                    row["sub_name"],
-                    safe_int(row["sort_order"], 0),
-                    1 if safe_int(row["is_available"], 1) != 0 else 0,
-                    created,
-                ),
-            )
-            prod_map[row["id"]] = dst.lastrowid
+            for row in prod_rows:
+                new_cat_id = cat_map.get(row["category_id"])
+                if not new_cat_id:
+                    continue
+                created = row["updated_at"] if row["updated_at"] else now_iso()
+                dst.execute(
+                    "INSERT INTO products (category_id, name, price, image, description, sort_order, is_active, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        new_cat_id,
+                        row["name"],
+                        safe_int(row["price"], 0),
+                        row["img"],
+                        row["sub_name"],
+                        safe_int(row["sort_order"], 0),
+                        1 if safe_int(row["is_available"], 1) != 0 else 0,
+                        created,
+                    ),
+                )
+                prod_map[row["id"]] = dst.lastrowid
 
         imported_orders = 0
         imported_items = 0
@@ -250,27 +338,75 @@ def import_legacy(source, target, slug, replace_menu, replace_orders, dry_run):
                     )
                     imported_items += 1
 
+        summary = {
+            "slug": slug,
+            "categories": len(cat_map),
+            "products": len(prod_map),
+            "orders": imported_orders,
+            "order_items": imported_items,
+            "source_orders": src_order_count,
+            "target": target,
+        }
+
         if dry_run:
             dst_conn.rollback()
             print("[INFO] dry-run complete, rolled back changes")
-            return
+            return summary
 
         dst_conn.commit()
         print(
             f"[OK] imported categories={len(cat_map)}, products={len(prod_map)}, "
             f"orders={imported_orders}, order_items={imported_items}"
         )
+        return summary
 
     finally:
         src_conn.close()
         dst_conn.close()
 
 
+def import_all_shops(source, target_dir, replace_menu, replace_orders, dry_run, only_slugs):
+    src_conn = sqlite3.connect(source)
+    try:
+        slugs = list_legacy_slugs(src_conn)
+    finally:
+        src_conn.close()
+
+    if only_slugs:
+        wanted = {x.strip() for x in only_slugs.split(",") if x.strip()}
+        slugs = [s for s in slugs if s in wanted]
+
+    if not slugs:
+        print("[WARN] no shops matched for import")
+        return []
+
+    print(f"[INFO] importing {len(slugs)} shops into {target_dir}")
+
+    results = []
+    for slug in slugs:
+        target = os.path.join(target_dir, slug, "data", "shop.db")
+        print(f"\n=== [{slug}] -> {target} ===")
+        result = import_legacy(
+            source=source,
+            target=target,
+            slug=slug,
+            replace_menu=replace_menu,
+            replace_orders=replace_orders,
+            dry_run=dry_run,
+        )
+        results.append(result)
+
+    return results
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Import menu/orders from legacy meituanGo sqlite DB into meituanone DB")
+    parser = argparse.ArgumentParser(description="Import legacy meituanGo sqlite data into meituanone DB")
     parser.add_argument("--source", required=True, help="path to legacy meituan.db")
-    parser.add_argument("--target", required=True, help="path to meituanone shop.db")
-    parser.add_argument("--slug", required=True, help="legacy shop slug, e.g. 05")
+    parser.add_argument("--target", help="path to single target shop.db (single-shop mode)")
+    parser.add_argument("--slug", help="legacy shop slug in single-shop mode, e.g. 05")
+    parser.add_argument("--all-shops", action="store_true", help="import all legacy slugs")
+    parser.add_argument("--target-dir", help="base directory for all-shops mode, e.g. deployments/shops")
+    parser.add_argument("--slugs", help="comma-separated subset in all-shops mode, e.g. 01,02,rtiam")
     parser.add_argument("--replace-menu", action="store_true", help="replace target categories/products")
     parser.add_argument("--replace-orders", action="store_true", help="replace target orders/order_items")
     parser.add_argument("--dry-run", action="store_true", help="run import and rollback")
@@ -281,14 +417,37 @@ def main():
         sys.exit(2)
 
     try:
-        import_legacy(
-            source=args.source,
-            target=args.target,
-            slug=args.slug,
-            replace_menu=args.replace_menu,
-            replace_orders=args.replace_orders,
-            dry_run=args.dry_run,
-        )
+        if args.all_shops:
+            if not args.target_dir:
+                print("[ERROR] --target-dir is required with --all-shops", file=sys.stderr)
+                sys.exit(2)
+
+            results = import_all_shops(
+                source=args.source,
+                target_dir=args.target_dir,
+                replace_menu=args.replace_menu,
+                replace_orders=args.replace_orders,
+                dry_run=args.dry_run,
+                only_slugs=args.slugs,
+            )
+
+            total_menu = sum(r["products"] for r in results)
+            total_orders = sum(r["orders"] for r in results)
+            print(f"\n[SUMMARY] shops={len(results)} products={total_menu} orders={total_orders}")
+        else:
+            if not args.target or not args.slug:
+                print("[ERROR] --target and --slug are required in single-shop mode", file=sys.stderr)
+                sys.exit(2)
+
+            import_legacy(
+                source=args.source,
+                target=args.target,
+                slug=args.slug,
+                replace_menu=args.replace_menu,
+                replace_orders=args.replace_orders,
+                dry_run=args.dry_run,
+            )
+
     except Exception as exc:
         print(f"[ERROR] {exc}", file=sys.stderr)
         sys.exit(1)

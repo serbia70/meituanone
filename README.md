@@ -236,3 +236,30 @@ python scripts/import-legacy-db.py \
 ```
 
 Note: in your provided legacy database, slug `05` has menu data but `0` orders.
+
+Import all shops into per-shop databases (for multi-store deployment folders):
+
+```bash
+python scripts/import-legacy-db.py \
+  --source /path/to/meituan.db \
+  --all-shops \
+  --target-dir /opt/meituanone/deployments/shops \
+  --replace-menu \
+  --replace-orders
+```
+
+Each shop will be written to:
+
+`/opt/meituanone/deployments/shops/<slug>/data/shop.db`
+
+Optional subset import:
+
+```bash
+python scripts/import-legacy-db.py \
+  --source /path/to/meituan.db \
+  --all-shops \
+  --target-dir /opt/meituanone/deployments/shops \
+  --slugs 01,02,rtiam \
+  --replace-menu \
+  --replace-orders
+```
